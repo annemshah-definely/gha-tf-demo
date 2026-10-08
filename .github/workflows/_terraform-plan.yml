@@ -1,0 +1,196 @@
+# Reusable workflow: speculative `terraform plan` for ONE environment (a "workspace").
+#
+# Produces an HCP Terraform-style run panel as a sticky PR comment (one per environment,
+# updated in place on every push) and as the job summary. The job is read-only:
+# `-lock=false`, no state writes, no apply.
+#
+# Called by .github/workflows/terraform.yml - you normally don't edit this file.
+
+name: terraform-plan
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment / workspace name (cmn, nonprod, production ...)
+        type: string
+        required: true
+      working-directory:
+        description: Directory holding the root module for this environment
+        type: string
+        required: true
+      changed:
+        description: >-
+          Set to false to skip this environment. A skipped job reports "skipped",
+          which still satisfies a required status check on the branch ruleset.
+        type: boolean
+        default: true
+      terraform-version:
+        description: Version constraint for hashicorp/setup-terraform (e.g. 1.15.x)
+        type: string
+        default: '1.15.x'
+      aws-role-arn:
+        description: IAM role assumed via OIDC for the plan (read-only). Empty = skip AWS auth.
+        type: string
+        default: ''
+      aws-region:
+        type: string
+        default: us-east-1
+      init-args:
+        description: Extra arguments for `terraform init` (e.g. -backend-config=...)
+        type: string
+        default: ''
+      plan-args:
+        description: Extra arguments for `terraform plan` (e.g. -var-file=...)
+        type: string
+        default: ''
+
+jobs:
+  plan:
+    name: plan
+    if: inputs.changed
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read        # checkout
+      id-token: write       # OIDC -> cloud credentials
+      pull-requests: write  # sticky plan comment
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: '0'
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false   # the wrapper breaks exit codes and output redirection
+
+      - name: Configure AWS credentials (OIDC)
+        if: inputs.aws-role-arn != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+          role-session-name: tf-plan-${{ inputs.environment }}-${{ github.run_id }}
+
+      - name: Prepare run directory
+        # Everything the run produces lives outside the working tree, under $RUNNER_TEMP.
+        # NOTE: plan.json and tfplan can contain sensitive values - they are never uploaded or printed.
+        run: |
+          mkdir -p "$RUNNER_TEMP/tf-run"
+          echo "TF_RUN_DIR=$RUNNER_TEMP/tf-run" >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        id: init
+        env:
+          INIT_ARGS: ${{ inputs.init-args }}
+        run: |
+          # shellcheck disable=SC2086  # INIT_ARGS is intentionally word-split
+          terraform init -input=false -no-color $INIT_ARGS 2>&1 | tee -a "$TF_RUN_DIR/run.log"
+
+      - name: Terraform fmt
+        id: fmt
+        continue-on-error: true   # still plan so reviewers see the changes; the job is failed at the end
+        run: terraform fmt -check -diff -recursive 2>&1 | tee "$TF_RUN_DIR/fmt.diff"
+
+      - name: Terraform validate
+        id: validate
+        run: terraform validate -no-color 2>&1 | tee -a "$TF_RUN_DIR/run.log"
+
+      - name: Terraform plan
+        id: plan
+        env:
+          PLAN_ARGS: ${{ inputs.plan-args }}
+        # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes
+        # -lock=false: speculative plans never touch the state lock (read-only credentials suffice)
+        run: |
+          set +e
+          # shellcheck disable=SC2086  # PLAN_ARGS is intentionally word-split
+          terraform plan -input=false -no-color -lock=false -detailed-exitcode \
+            -out="$TF_RUN_DIR/tfplan" $PLAN_ARGS 2>&1 | tee -a "$TF_RUN_DIR/run.log"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          case "$code" in
+            0) echo "has-changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "has-changes=true"  >> "$GITHUB_OUTPUT" ;;
+            *) echo "has-changes=false" >> "$GITHUB_OUTPUT"; exit "$code" ;;
+          esac
+
+      - name: Terraform show
+        if: steps.plan.outcome == 'success'
+        run: |
+          terraform show -no-color "$TF_RUN_DIR/tfplan" > "$TF_RUN_DIR/plan.txt"
+          terraform show -json     "$TF_RUN_DIR/tfplan" > "$TF_RUN_DIR/plan.json"
+
+      - name: Render HCP-style run panel
+        id: render
+        if: ${{ !cancelled() }}
+        env:
+          TF_ENVIRONMENT: ${{ inputs.environment }}
+          TF_WORKDIR: ${{ inputs.working-directory }}
+          STAGE_INIT: ${{ steps.init.outcome }}
+          STAGE_FMT: ${{ steps.fmt.outcome }}
+          STAGE_VALIDATE: ${{ steps.validate.outcome }}
+          STAGE_PLAN: ${{ steps.plan.outcome }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 "$GITHUB_WORKSPACE/.github/scripts/render_plan.py" \
+            --mode plan \
+            --environment "$TF_ENVIRONMENT" \
+            --working-directory "$TF_WORKDIR" \
+            --plan-json "$TF_RUN_DIR/plan.json" \
+            --plan-txt  "$TF_RUN_DIR/plan.txt" \
+            --run-log   "$TF_RUN_DIR/run.log" \
+            --fmt-diff  "$TF_RUN_DIR/fmt.diff" \
+            --stage "init=$STAGE_INIT" \
+            --stage "fmt=$STAGE_FMT" \
+            --stage "validate=$STAGE_VALIDATE" \
+            --stage "plan=$STAGE_PLAN" \
+            --server-url "$GITHUB_SERVER_URL" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --commit "$COMMIT_SHA" \
+            --actor "$GITHUB_ACTOR" \
+            --pr "$PR_NUMBER" \
+            --comment-out "$TF_RUN_DIR/comment.md" \
+            --summary-out "$TF_RUN_DIR/summary.md"
+          cat "$TF_RUN_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post / update PR comment
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        env:
+          TF_ENVIRONMENT: ${{ inputs.environment }}
+          COMMENT_FILE: ${{ env.TF_RUN_DIR }}/comment.md
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = `<!-- terraform-plan:${process.env.TF_ENVIRONMENT} -->`;
+            const body = fs.readFileSync(process.env.COMMENT_FILE, 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Fail if formatting check failed
+        if: steps.fmt.outcome == 'failure'
+        run: |
+          echo "::error::terraform fmt -check found unformatted files. Run 'terraform fmt -recursive' and push."
+          exit 1

@@ -1,0 +1,158 @@
+
+Note: Objects have changed outside of Terraform
+
+Terraform detected the following changes made outside of Terraform since the
+last "terraform apply" which may have affected this plan:
+
+  # aws_instance.web has changed
+  ~ resource "aws_instance" "web" {
+        id                                   = "i-0123456789abcdef0"
+      ~ tags                                 = {
+          + "CostCentre" = "platform"
+            # (2 unchanged elements hidden)
+        }
+        # (29 unchanged attributes hidden)
+
+        # (8 unchanged blocks hidden)
+    }
+
+
+Unless you have made equivalent changes to your configuration, or ignored the
+relevant attributes using ignore_changes, the following plan may include
+actions to undo or respond to these changes.
+
+─────────────────────────────────────────────────────────────────────────────
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+  ~ update in-place
+  - destroy
+-/+ destroy and then create replacement
+ <= read (data resources)
+
+Terraform will perform the following actions:
+
+  # data.aws_ami.ubuntu will be read during apply
+  # (config refers to values not yet known)
+ <= data "aws_ami" "ubuntu" {
+      + architecture          = (known after apply)
+      + id                    = (known after apply)
+      + most_recent           = true
+      + owners                = [
+          + "099720109477",
+        ]
+
+      + filter {
+          + name   = "name"
+          + values = [
+              + "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*",
+            ]
+        }
+    }
+
+  # aws_db_instance.main must be replaced
+-/+ resource "aws_db_instance" "main" {
+      ~ address                               = "main.abc123.eu-west-1.rds.amazonaws.com" -> (known after apply)
+      ~ arn                                   = "arn:aws:rds:eu-west-1:123456789012:db:main" -> (known after apply)
+      ~ engine_version                        = "14.9" -> "15.4" # forces replacement
+      ~ id                                    = "main" -> (known after apply)
+        identifier                            = "main"
+        instance_class                        = "db.t4g.medium"
+      - password                              = (sensitive value) -> null
+        # (40 unchanged attributes hidden)
+    }
+
+  # aws_iam_user.legacy will be destroyed
+  # (because aws_iam_user.legacy is not in configuration)
+  - resource "aws_iam_user" "legacy" {
+      - arn           = "arn:aws:iam::123456789012:user/legacy" -> null
+      - force_destroy = false -> null
+      - id            = "legacy" -> null
+      - name          = "legacy" -> null
+      - path          = "/" -> null
+      - tags          = {} -> null
+      - tags_all      = {} -> null
+      - unique_id     = "AIDAEXAMPLE" -> null
+    }
+
+  # aws_instance.web will be updated in-place
+  ~ resource "aws_instance" "web" {
+        id                                   = "i-0123456789abcdef0"
+      ~ instance_type                        = "t3.micro" -> "t3.small"
+      ~ tags                                 = {
+          + "Owner"      = "platform"
+            # (3 unchanged elements hidden)
+        }
+      ~ tags_all                             = {
+          + "Owner"      = "platform"
+            # (3 unchanged elements hidden)
+        }
+        # (28 unchanged attributes hidden)
+
+        # (8 unchanged blocks hidden)
+    }
+
+  # aws_s3_bucket.existing will be imported
+    resource "aws_s3_bucket" "existing" {
+        arn                         = "arn:aws:s3:::acme-existing-assets"
+        bucket                      = "acme-existing-assets"
+        bucket_domain_name          = "acme-existing-assets.s3.amazonaws.com"
+        id                          = "acme-existing-assets"
+        region                      = "eu-west-1"
+        tags                        = {}
+        tags_all                    = {}
+    }
+
+  # aws_s3_bucket.logs will be created
+  + resource "aws_s3_bucket" "logs" {
+      + acceleration_status         = (known after apply)
+      + acl                         = (known after apply)
+      + arn                         = (known after apply)
+      + bucket                      = "acme-production-logs"
+      + bucket_domain_name          = (known after apply)
+      + force_destroy               = false
+      + id                          = (known after apply)
+      + region                      = (known after apply)
+      + tags                        = {
+          + "Environment" = "production"
+          + "ManagedBy"   = "terraform"
+        }
+      + tags_all                    = {
+          + "Environment" = "production"
+          + "ManagedBy"   = "terraform"
+        }
+
+      + server_side_encryption_configuration (known after apply)
+
+      + versioning (known after apply)
+    }
+
+  # module.network.aws_subnet.private["eu-west-1a"] will be created
+  + resource "aws_subnet" "private" {
+      + arn                                            = (known after apply)
+      + availability_zone                              = "eu-west-1a"
+      + cidr_block                                     = "10.0.10.0/24"
+      + id                                             = (known after apply)
+      + map_public_ip_on_launch                        = false
+      + tags                                           = {
+          + "Name" = "production-private-eu-west-1a"
+        }
+      + vpc_id                                         = "vpc-0abc"
+    }
+
+Plan: 1 to import, 3 to add, 1 to change, 2 to destroy.
+
+Changes to Outputs:
+  + logs_bucket_arn = (known after apply)
+  ~ db_endpoint     = "main.abc123.eu-west-1.rds.amazonaws.com:5432" -> (known after apply)
+  - legacy_user_arn = "arn:aws:iam::123456789012:user/legacy" -> null
+╷
+│ Warning: Argument is deprecated
+│ 
+│   with aws_s3_bucket.logs,
+│   on main.tf line 42, in resource "aws_s3_bucket" "logs":
+│   42:   acl = "private"
+│ 
+│ Use the aws_s3_bucket_acl resource instead
+╵

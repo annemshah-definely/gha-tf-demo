@@ -1,0 +1,92 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.15.8",
+  "timestamp": "2026-10-08T09:41:12Z",
+  "resource_changes": [
+    {
+      "address": "data.aws_ami.ubuntu",
+      "mode": "data",
+      "type": "aws_ami",
+      "name": "ubuntu",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "action_reason": "read_because_config_unknown",
+      "change": { "actions": ["read"] }
+    },
+    {
+      "address": "aws_db_instance.main",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "main",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "action_reason": "replace_because_cannot_update",
+      "change": { "actions": ["delete", "create"], "replace_paths": [["engine_version"]] }
+    },
+    {
+      "address": "aws_iam_user.legacy",
+      "mode": "managed",
+      "type": "aws_iam_user",
+      "name": "legacy",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "action_reason": "delete_because_no_resource_config",
+      "change": { "actions": ["delete"] }
+    },
+    {
+      "address": "aws_instance.web",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "web",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": { "actions": ["update"] }
+    },
+    {
+      "address": "aws_s3_bucket.existing",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "existing",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": { "actions": ["no-op"], "importing": { "id": "acme-existing-assets" } }
+    },
+    {
+      "address": "aws_s3_bucket.logs",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "logs",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": { "actions": ["create"] }
+    },
+    {
+      "address": "aws_security_group.app",
+      "mode": "managed",
+      "type": "aws_security_group",
+      "name": "app",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": { "actions": ["no-op"] }
+    },
+    {
+      "address": "module.network.aws_subnet.private[\"eu-west-1a\"]",
+      "module_address": "module.network",
+      "mode": "managed",
+      "type": "aws_subnet",
+      "name": "private",
+      "index": "eu-west-1a",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": { "actions": ["create"] }
+    }
+  ],
+  "resource_drift": [
+    {
+      "address": "aws_instance.web",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "web",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": { "actions": ["update"] }
+    }
+  ],
+  "output_changes": {
+    "logs_bucket_arn": { "actions": ["create"] },
+    "db_endpoint": { "actions": ["update"] },
+    "legacy_user_arn": { "actions": ["delete"] },
+    "vpc_id": { "actions": ["no-op"] }
+  }
+}

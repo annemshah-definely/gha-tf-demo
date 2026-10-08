@@ -1,0 +1,151 @@
+# Terraform pipeline - the only file you need to edit to add / rename environments.
+#
+#   push branch -> open PR ---> plan (cmn) ─┐
+#                                plan (nonprod) ├─ all green + review  ->  squash / rebase merge
+#                                plan (production) ┘        (enforced by .github/rulesets/main.json)
+#
+#   merge to main -> cmn: plan -> apply
+#                     └-> nonprod: plan -> apply
+#                           └-> production: plan -> ⏸ required reviewers ⏸ -> apply
+#
+# Each plan / apply renders an HCP Terraform-style run panel (PR comment + job summary).
+# Gates live in GitHub Environments (Settings -> Environments): required reviewers,
+# wait timers and "deployment branches = main" on `production` (and `nonprod` if you like).
+
+name: Terraform
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:            # keeps the pipeline merge-queue compatible (no comment is posted there)
+    branches: [main]
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+concurrency:
+  # PRs: one run per PR, a newer push supersedes the in-flight plan (like HCP's speculative plans).
+  # main: applies are serialised; a newer merge waits for the current promotion to finish.
+  group: terraform-${{ github.event_name == 'push' && 'main' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  # --------------------------------------------------------------------------- PR: what changed?
+  changes:
+    name: detect changes
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      environments: ${{ steps.detect.outputs.environments }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Map changed files to environments
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        # Conservative rule: a change anywhere outside environments/<env>/ (modules/, workflows,
+        # scripts, root files ...) affects EVERY environment. Docs never affect anything.
+        run: |
+          shopt -s nullglob
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          all=false
+          declare -A hit=()
+          while IFS= read -r path; do
+            [[ -z "$path" ]] && continue
+            case "$path" in
+              *.md|docs/*|.gitignore|LICENSE) continue ;;
+              environments/*/*) env_name=${path#environments/}; hit[${env_name%%/*}]=true ;;
+              *) all=true ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA" HEAD)
+          json="{"
+          for dir in environments/*/; do
+            name=$(basename "$dir")
+            if $all || [[ ${hit[$name]:-false} == true ]]; then v=true; else v=false; fi
+            json+="\"$name\":$v,"
+          done
+          json="${json%,}}"
+          echo "environments=$json" >> "$GITHUB_OUTPUT"
+          echo "Environments affected by this change: $json"
+
+  # --------------------------------------------------------------------------- PR: speculative plans
+  plan:
+    name: ${{ matrix.environment }}
+    needs: changes
+    # Runs on pull_request and merge_group. If change detection itself broke, plan everything
+    # rather than silently reporting "skipped" (which would satisfy the required checks).
+    if: ${{ !cancelled() && github.event_name != 'push' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - environment: cmn
+            working-directory: environments/cmn
+            aws-role-arn: ${{ vars.AWS_PLAN_ROLE_ARN_CMN }}
+          - environment: nonprod
+            working-directory: environments/nonprod
+            aws-role-arn: ${{ vars.AWS_PLAN_ROLE_ARN_NONPROD }}
+          - environment: production
+            working-directory: environments/production
+            aws-role-arn: ${{ vars.AWS_PLAN_ROLE_ARN_PRODUCTION }}
+    uses: ./.github/workflows/_terraform-plan.yml
+    with:
+      environment: ${{ matrix.environment }}
+      working-directory: ${{ matrix.working-directory }}
+      aws-role-arn: ${{ matrix.aws-role-arn }}
+      aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      terraform-version: ${{ vars.TERRAFORM_VERSION || '1.15.x' }}
+      changed: ${{ needs.changes.result != 'success' || fromJSON(needs.changes.outputs.environments)[matrix.environment] == true }}
+    secrets: inherit
+
+  # --------------------------------------------------------------------------- main: promote
+  apply-cmn:
+    name: cmn
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/_terraform-apply.yml
+    with:
+      environment: cmn
+      working-directory: environments/cmn
+      aws-plan-role-arn: ${{ vars.AWS_PLAN_ROLE_ARN_CMN }}
+      aws-apply-role-arn: ${{ vars.AWS_APPLY_ROLE_ARN_CMN }}
+      aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      terraform-version: ${{ vars.TERRAFORM_VERSION || '1.15.x' }}
+    secrets: inherit
+
+  apply-nonprod:
+    name: nonprod
+    needs: apply-cmn          # remove `needs` to promote environments in parallel instead
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/_terraform-apply.yml
+    with:
+      environment: nonprod
+      working-directory: environments/nonprod
+      aws-plan-role-arn: ${{ vars.AWS_PLAN_ROLE_ARN_NONPROD }}
+      aws-apply-role-arn: ${{ vars.AWS_APPLY_ROLE_ARN_NONPROD }}
+      aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      terraform-version: ${{ vars.TERRAFORM_VERSION || '1.15.x' }}
+    secrets: inherit
+
+  apply-production:
+    name: production
+    needs: apply-nonprod
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/_terraform-apply.yml
+    with:
+      environment: production   # GitHub Environment "production" holds the approval gate
+      working-directory: environments/production
+      aws-plan-role-arn: ${{ vars.AWS_PLAN_ROLE_ARN_PRODUCTION }}
+      aws-apply-role-arn: ${{ vars.AWS_APPLY_ROLE_ARN_PRODUCTION }}
+      aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      terraform-version: ${{ vars.TERRAFORM_VERSION || '1.15.x' }}
+    secrets: inherit

@@ -1,0 +1,256 @@
+# Reusable workflow: plan -> (gate) -> apply for ONE environment on the default branch.
+#
+# Mirrors HCP Terraform's "confirm & apply" model:
+#   1. `plan` re-plans against main, renders the HCP-style panel into the job summary
+#      and uploads the binary plan file.
+#   2. `apply` runs under the GitHub Environment named after the input. If that
+#      environment has required reviewers, the run pauses here - reviewers read the
+#      plan in the summary, then approve. The EXACT saved plan is applied; if the
+#      state changed in the meantime Terraform refuses with "Saved plan is stale".
+#   3. When the plan has no changes the apply job is skipped (no pointless approvals).
+#
+# Called by .github/workflows/terraform.yml - you normally don't edit this file.
+
+name: terraform-apply
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Environment / workspace name. Must match a GitHub Environment (that is where the gate lives).
+        type: string
+        required: true
+      working-directory:
+        type: string
+        required: true
+      terraform-version:
+        type: string
+        default: '1.15.x'
+      aws-plan-role-arn:
+        description: Read-only role for the pre-approval plan. Empty = skip AWS auth.
+        type: string
+        default: ''
+      aws-apply-role-arn:
+        description: Read/write role for the apply. Empty = skip AWS auth.
+        type: string
+        default: ''
+      aws-region:
+        type: string
+        default: us-east-1
+      init-args:
+        type: string
+        default: ''
+      plan-args:
+        type: string
+        default: ''
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      has-changes: ${{ steps.plan.outputs.has-changes }}
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: '0'
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC)
+        if: inputs.aws-plan-role-arn != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-plan-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+          role-session-name: tf-plan-${{ inputs.environment }}-${{ github.run_id }}
+
+      - name: Prepare run directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/tf-run"
+          echo "TF_RUN_DIR=$RUNNER_TEMP/tf-run" >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        id: init
+        env:
+          INIT_ARGS: ${{ inputs.init-args }}
+        run: |
+          # shellcheck disable=SC2086  # INIT_ARGS is intentionally word-split
+          terraform init -input=false -no-color $INIT_ARGS 2>&1 | tee -a "$TF_RUN_DIR/run.log"
+
+      - name: Terraform validate
+        id: validate
+        run: terraform validate -no-color 2>&1 | tee -a "$TF_RUN_DIR/run.log"
+
+      - name: Terraform plan
+        id: plan
+        env:
+          PLAN_ARGS: ${{ inputs.plan-args }}
+        run: |
+          set +e
+          # shellcheck disable=SC2086  # PLAN_ARGS is intentionally word-split
+          terraform plan -input=false -no-color -lock=false -detailed-exitcode \
+            -out="$TF_RUN_DIR/tfplan" $PLAN_ARGS 2>&1 | tee -a "$TF_RUN_DIR/run.log"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          case "$code" in
+            0) echo "has-changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "has-changes=true"  >> "$GITHUB_OUTPUT" ;;
+            *) echo "has-changes=false" >> "$GITHUB_OUTPUT"; exit "$code" ;;
+          esac
+
+      - name: Terraform show
+        if: steps.plan.outcome == 'success'
+        run: |
+          terraform show -no-color "$TF_RUN_DIR/tfplan" > "$TF_RUN_DIR/plan.txt"
+          terraform show -json     "$TF_RUN_DIR/tfplan" > "$TF_RUN_DIR/plan.json"
+
+      - name: Render HCP-style run panel
+        if: ${{ !cancelled() }}
+        env:
+          TF_ENVIRONMENT: ${{ inputs.environment }}
+          TF_WORKDIR: ${{ inputs.working-directory }}
+          STAGE_INIT: ${{ steps.init.outcome }}
+          STAGE_VALIDATE: ${{ steps.validate.outcome }}
+          STAGE_PLAN: ${{ steps.plan.outcome }}
+        run: |
+          python3 "$GITHUB_WORKSPACE/.github/scripts/render_plan.py" \
+            --mode apply \
+            --environment "$TF_ENVIRONMENT" \
+            --working-directory "$TF_WORKDIR" \
+            --plan-json "$TF_RUN_DIR/plan.json" \
+            --plan-txt  "$TF_RUN_DIR/plan.txt" \
+            --run-log   "$TF_RUN_DIR/run.log" \
+            --stage "init=$STAGE_INIT" \
+            --stage "validate=$STAGE_VALIDATE" \
+            --stage "plan=$STAGE_PLAN" \
+            --server-url "$GITHUB_SERVER_URL" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --commit "$GITHUB_SHA" \
+            --actor "$GITHUB_ACTOR" \
+            --summary-out "$TF_RUN_DIR/summary.md"
+          cat "$TF_RUN_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan file
+        # The binary plan may contain sensitive values and is readable by anyone with read
+        # access to the repository's workflow runs - hence the 1-day retention.
+        if: steps.plan.outputs.has-changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: ${{ env.TF_RUN_DIR }}/tfplan
+          retention-days: 1
+          if-no-files-found: error
+
+  apply:
+    name: apply
+    needs: plan
+    if: needs.plan.outputs.has-changes == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}   # <- required reviewers / wait timer / branch policy live here
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TF_IN_AUTOMATION: 'true'
+      TF_INPUT: '0'
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC)
+        if: inputs.aws-apply-role-arn != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-apply-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+          role-session-name: tf-apply-${{ inputs.environment }}-${{ github.run_id }}
+
+      - name: Prepare run directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/tf-run"
+          echo "TF_RUN_DIR=$RUNNER_TEMP/tf-run" >> "$GITHUB_ENV"
+
+      - name: Terraform init
+        id: init
+        env:
+          INIT_ARGS: ${{ inputs.init-args }}
+        run: |
+          # shellcheck disable=SC2086  # INIT_ARGS is intentionally word-split
+          terraform init -input=false -no-color $INIT_ARGS 2>&1 | tee -a "$TF_RUN_DIR/run.log"
+
+      - name: Download plan file
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: ${{ env.TF_RUN_DIR }}
+
+      - name: Terraform apply
+        id: apply
+        # Applies the saved plan exactly as reviewed. No -auto-approve needed with a plan file.
+        run: terraform apply -input=false -no-color "$TF_RUN_DIR/tfplan" 2>&1 | tee "$TF_RUN_DIR/apply.log"
+
+      - name: Terraform show
+        if: ${{ !cancelled() }}
+        run: |
+          terraform show -no-color "$TF_RUN_DIR/tfplan" > "$TF_RUN_DIR/plan.txt" || true
+          terraform show -json     "$TF_RUN_DIR/tfplan" > "$TF_RUN_DIR/plan.json" || true
+
+      - name: Render HCP-style run panel
+        if: ${{ !cancelled() }}
+        env:
+          TF_ENVIRONMENT: ${{ inputs.environment }}
+          TF_WORKDIR: ${{ inputs.working-directory }}
+          STAGE_INIT: ${{ steps.init.outcome }}
+          STAGE_APPLY: ${{ steps.apply.outcome }}
+        run: |
+          python3 "$GITHUB_WORKSPACE/.github/scripts/render_plan.py" \
+            --mode apply \
+            --environment "$TF_ENVIRONMENT" \
+            --working-directory "$TF_WORKDIR" \
+            --plan-json "$TF_RUN_DIR/plan.json" \
+            --plan-txt  "$TF_RUN_DIR/plan.txt" \
+            --run-log   "$TF_RUN_DIR/run.log" \
+            --apply-log "$TF_RUN_DIR/apply.log" \
+            --stage "init=$STAGE_INIT" \
+            --stage "apply=$STAGE_APPLY" \
+            --server-url "$GITHUB_SERVER_URL" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-number "$GITHUB_RUN_NUMBER" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --commit "$GITHUB_SHA" \
+            --actor "$GITHUB_ACTOR" \
+            --summary-out "$TF_RUN_DIR/summary.md"
+          cat "$TF_RUN_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
