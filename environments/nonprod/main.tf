@@ -24,7 +24,7 @@ terraform {
 
 # Demo resource so the pipeline is runnable before any cloud credentials exist.
 resource "random_pet" "demo" {
-  length = 2
+  length = 3
 
   keepers = {
     environment = "nonprod"
