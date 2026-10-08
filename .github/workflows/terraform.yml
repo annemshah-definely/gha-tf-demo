@@ -47,7 +47,7 @@ jobs:
     outputs:
       environments: ${{ steps.detect.outputs.environments }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Map changed files to environments
         id: detect

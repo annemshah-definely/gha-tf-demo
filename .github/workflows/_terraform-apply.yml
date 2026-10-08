@@ -63,17 +63,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ inputs.terraform-version }}
           terraform_wrapper: false
 
       - name: Configure AWS credentials (OIDC)
         if: inputs.aws-plan-role-arn != ''
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ inputs.aws-plan-role-arn }}
           aws-region: ${{ inputs.aws-region }}
@@ -153,7 +153,7 @@ jobs:
         # The binary plan may contain sensitive values and is readable by anyone with read
         # access to the repository's workflow runs - hence the 1-day retention.
         if: steps.plan.outputs.has-changes == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: tfplan-${{ inputs.environment }}
           path: ${{ env.TF_RUN_DIR }}/tfplan
@@ -181,17 +181,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ inputs.terraform-version }}
           terraform_wrapper: false
 
       - name: Configure AWS credentials (OIDC)
         if: inputs.aws-apply-role-arn != ''
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ inputs.aws-apply-role-arn }}
           aws-region: ${{ inputs.aws-region }}
@@ -211,7 +211,7 @@ jobs:
           terraform init -input=false -no-color $INIT_ARGS 2>&1 | tee -a "$TF_RUN_DIR/run.log"
 
       - name: Download plan file
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: tfplan-${{ inputs.environment }}
           path: ${{ env.TF_RUN_DIR }}
